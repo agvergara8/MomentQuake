@@ -1,0 +1,35 @@
+task: reconstruction
+task_name: reconstruction
+input_size: 24
+seq_len: 512
+batch_size: 32
+normalize: true
+
+# Arquitectura del modelo
+transformer_type: encoder_only
+transformer_backbone: t5
+use_cls_token: true
+use_positional_encoding: true
+output_attention: false
+normalize_before: false
+patch_len: 16
+patch_stride_len: 16
+n_channels: 24
+
+# Parámetros de arquitectura (duplicados del t5_config para compatibilidad)
+d_model: 128
+nhead: 4
+num_encoder_layers: 6
+dropout: 0.1
+dim_feedforward: 512
+
+# Clasificación
+num_class: 2 
+
+# Configuración del backbone t5
+t5_config:
+  d_model: 128
+  num_heads: 4
+  num_layers: 6
+  dropout_rate: 0.1
+  feed_forward_size: 512
