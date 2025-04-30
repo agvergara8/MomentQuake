@@ -162,3 +162,5 @@ cython_debug/
 
 # added by Vergara
 /dataPickle
+/datasets
+/detected_windows
