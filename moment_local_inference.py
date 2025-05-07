@@ -1,87 +1,97 @@
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
-from sklearn.ensemble import IsolationForest
-import os
+from momentfm.models.moment import MOMENT
 import yaml
 from types import SimpleNamespace
-import sys
-from transformers import T5Config
-import argparse
+import os
+import pandas as pd
 
-# --- Argumentos desde línea de comandos ---
-parser = argparse.ArgumentParser()
-parser.add_argument("--npy_path", type=str, default="datasets/CSIC_LaPalma_Geophone1_X.npy", help="Ruta al archivo .npy")
-args = parser.parse_args()
+# --- Parámetros de entrada ---
+DATA_PATH = "datasets/CSIC_LaPalma_Geophone1_X.npy"  # Ruta a tu archivo .npy
+CONFIG_PATH = "configs/moment_base.yaml"             # Configuración del modelo
+UMBRAL_PERCENTIL = 95                                 # Umbral de clasificación (percentil del error)
+BLOCK_SIZE = 5000  # Número de ventanas a procesar por bloque (aumentado para menos interacción)
 
-# --- Añadir ruta local del repositorio momentfm ---
-sys.path.append(os.path.join(os.path.dirname(__file__), "momentfm"))
-from models.moment import MOMENT
+# --- Preguntar al usuario si quiere procesar todo o solo parte ---
+print("\n[INTERACTIVO] Elige el modo de ejecución:")
+print("1 - Procesar TODAS las ventanas")
+print("2 - Procesar por bloques con confirmación")
+modo = input("Introduce 1 o 2: ").strip()
+if modo not in ["1", "2"]:
+    print("[ERROR] Modo no válido. Saliendo.")
+    exit(1)
 
-# --- Configuración general ---
-BLOCK_SIZE = 10000
-
-# --- Cargar config YAML y convertirlo en Namespace ---
-with open("configs/moment_base.yaml", "r") as f:
+# --- Cargar configuración y modelo ---
+with open(CONFIG_PATH, "r") as f:
     config_dict = yaml.safe_load(f)
+config_dict["task_name"] = "reconstruction"
 config = SimpleNamespace(**config_dict)
-model_config = T5Config.from_dict(config.t5_config)
 
-# --- Inicializar modelo ---
 model = MOMENT(config)
 model.eval()
 
-# --- Cargar dataset completo (sin normalizar) ---
-data = np.load(args.npy_path)
-print(f"[INFO] Dataset cargado: {data.shape}")
+# --- Cargar datos ---
+print(f"[INFO] Cargando datos desde {DATA_PATH}")
+data = np.load(DATA_PATH)
+if data.ndim == 3 and data.shape[1] != 512:
+    data = np.transpose(data, (0, 2, 1))  # (N, 512, C)
 
-# --- Crear carpeta de salida para ventanas detectadas ---
-output_dir = os.path.join("detected_windows", os.path.splitext(os.path.basename(args.npy_path))[0])
-os.makedirs(output_dir, exist_ok=True)
+N = data.shape[0]
+print(f"[INFO] Total de ventanas: {N}")
 
-# --- Procesar por bloques ---
-total_windows = data.shape[0]
-saved = 0
-for start in range(0, total_windows, BLOCK_SIZE):
-    end = min(start + BLOCK_SIZE, total_windows)
-    print(f"[INFO] Procesando ventanas {start} a {end}")
+# --- Procesar en bloques ---
+all_mse = []
+for start in range(0, N, BLOCK_SIZE):
+    end = min(start + BLOCK_SIZE, N)
+    print(f"[INFO] Procesando ventanas {start} a {end-1}")
 
-    # --- Seleccionar bloque y convertir a tensor ---
-    block = data[start:end]
-    block_tensor = torch.tensor(block, dtype=torch.float32)
+    data_block = data[start:end]
+    data_tensor = torch.tensor(data_block, dtype=torch.float32).permute(0, 2, 1)  # (B, C, 512)
 
-    if block_tensor.ndim == 2:
-        block_tensor = block_tensor.unsqueeze(-1)
+    # Normalización local por bloque
+    mean = data_tensor.mean(dim=(0, 2), keepdim=True)
+    std = data_tensor.std(dim=(0, 2), keepdim=True) + 1e-6
+    data_norm = (data_tensor - mean) / std
 
-    block_tensor = block_tensor.permute(0, 2, 1)  # (N, C, L)
-    
-    # --- Normalizar bloque ---
-    mean = block_tensor.mean(dim=(0, 1), keepdim=True)
-    std = block_tensor.std(dim=(0, 1), keepdim=True) + 1e-6
-    block_norm = (block_tensor - mean) / std
-    
-    # --- Pasar por Moment ---
     with torch.no_grad():
-        outputs = model(x_enc=block_norm)
-    recon = outputs.reconstruction.cpu().numpy()
+        output = model.forward(x_enc=data_norm)
+        reconstruction = output.reconstruction
 
-    # --- Flatten y PCA/IF ---
-    features = recon.reshape(recon.shape[0], -1)
-    detector = IsolationForest(contamination=0.01, random_state=42)
-    anomaly_scores = detector.fit_predict(features)
+    mse = ((data_norm - reconstruction) ** 2).mean(dim=(1, 2)).cpu().numpy()
+    all_mse.append(mse)
 
-    # --- Guardar ventanas detectadas ---
-    event_indices = np.where(anomaly_scores == -1)[0]
-    print(f"[INFO] Se detectaron {len(event_indices)} eventos en este bloque")
+    if modo == "2":
+        cont = input("\n[INTERACTIVO] ¿Procesar siguiente bloque? (s/n): ").strip().lower()
+        if cont != "s":
+            print("[INFO] Proceso detenido por el usuario.")
+            break
 
-    for i, idx in enumerate(event_indices):
-        global_idx = start + idx
-        out_path = os.path.join(output_dir, f"window_{global_idx:05d}.npy")
-        np.save(out_path, data[global_idx])
-        saved += 1
-        
+# --- Concatenar errores y clasificar ---
+all_mse = np.concatenate(all_mse)
+threshold = np.percentile(all_mse, UMBRAL_PERCENTIL)
+event_mask = all_mse > threshold
 
+print(f"[INFO] Umbral = {threshold:.4f} (percentil {UMBRAL_PERCENTIL})")
+print(f"[INFO] Eventos detectados: {np.sum(event_mask)} / {len(all_mse)}")
 
-print(f"[INFO] Proceso completado. Total de eventos guardados: {saved}")
+# --- Guardar resultados numpy ---
+np.save("reconstruction_errors.npy", all_mse)
+np.save("predicted_event_mask.npy", event_mask.astype(np.uint8))
+print("[INFO] Guardado: reconstruction_errors.npy y predicted_event_mask.npy")
 
+# --- Enriquecer CSV con resultados ---
+csv_path = DATA_PATH.replace(".npy", ".csv")
+if os.path.exists(csv_path):
+    print(f"[INFO] Enriqueciendo archivo CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    if len(all_mse) > len(df):
+        print("[ERROR] Más errores calculados que ventanas en el CSV. Algo está mal.")
+        exit(1)
+    df_partial = df.iloc[:len(all_mse)].copy()
+    df_partial["reconstruction_error"] = all_mse
+    df_partial["es_evento"] = event_mask.astype(int)
+    output_csv = csv_path.replace(".csv", "_resultados.csv")
+    df_partial.to_csv(output_csv, index=False)
+    print(f"[INFO] Guardado CSV enriquecido: {output_csv}")
+else:
+    print(f"[ADVERTENCIA] No se encontró CSV: {csv_path}. No se generó resumen tabular.")

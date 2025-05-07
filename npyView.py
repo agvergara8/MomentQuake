@@ -1,40 +1,29 @@
-import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-import argparse
 
-# --- Argumentos desde línea de comandos ---
-parser = argparse.ArgumentParser()
-parser.add_argument("npy_path", type=str, help="Ruta al archivo .npy")
-parser.add_argument("--window", type=int, default=0, help="Índice de la ventana a visualizar")
-args = parser.parse_args()
+# --- Ruta al CSV enriquecido ---
+CSV_PATH = "datasets/CSIC_LaPalma_Geophone1_X_resultados.csv"
 
-# --- Cargar datos ---
-data = np.load(args.npy_path)
-print(f"[INFO] Shape del archivo: {data.shape}")
+# --- Cargar el CSV ---
+df = pd.read_csv(CSV_PATH)
 
-# --- Comprobar dimensiones ---
-if data.ndim != 4:
-    raise ValueError("Este visualizador espera datos con shape (N, C, L)")
+# --- Convertir timestamps con formatos mixtos (coma o sin milisegundos) ---
+df["timestamp"] = pd.to_datetime(df["timestamp"].str.replace(",", "."), format="mixed")
 
-N, C, L, J = data.shape
-w = args.window
-if w >= N:
-    raise IndexError(f"Índice de ventana fuera de rango (máximo {N-1})")
+# --- Crear gráfico ---
+plt.figure(figsize=(14, 5))
+plt.plot(df["timestamp"], df["reconstruction_error"], label="Error de reconstrucción (MSE)", color="blue")
 
-data = np.load("detected_events_windows.npy")
-print(f"Shape del array: {data.shape}")
+# Eventos detectados
+plt.scatter(
+    df[df["es_evento"] == 1]["timestamp"],
+    df[df["es_evento"] == 1]["reconstruction_error"],
+    color="red", label="Evento detectado", s=20
+)
 
-n_ventanas = data.shape[0]
-print(f"Número de ventanas: {n_ventanas}")
-
-# --- Visualización ---
-plt.figure(figsize=(14, 6))
-for ch in range(C):
-    plt.plot(data[w, ch], label=f"Canal {ch}", alpha=0.6)
-
-plt.title(f"Ventana {w} - Señales multicanal")
+plt.title("Eventos detectados sobre línea temporal")
 plt.xlabel("Tiempo")
-plt.ylabel("Amplitud")
+plt.ylabel("Error de reconstrucción")
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
