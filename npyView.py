@@ -1,30 +1,23 @@
-import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
-# --- Ruta al CSV enriquecido ---
-CSV_PATH = "datasets/CSIC_LaPalma_Geophone1_X_resultados.csv"
+# --- Cargar datos ---
+mse = np.load("reconstruction_errors.npy")
+event_mask = np.load("predicted_event_mask.npy").astype(bool)
 
-# --- Cargar el CSV ---
-df = pd.read_csv(CSV_PATH)
+# --- Umbral (recalculado por consistencia visual) ---
+threshold = np.percentile(mse, 95)
 
-# --- Convertir timestamps con formatos mixtos (coma o sin milisegundos) ---
-df["timestamp"] = pd.to_datetime(df["timestamp"].str.replace(",", "."), format="mixed")
-
-# --- Crear gráfico ---
-plt.figure(figsize=(14, 5))
-plt.plot(df["timestamp"], df["reconstruction_error"], label="Error de reconstrucción (MSE)", color="blue")
-
-# Eventos detectados
-plt.scatter(
-    df[df["es_evento"] == 1]["timestamp"],
-    df[df["es_evento"] == 1]["reconstruction_error"],
-    color="red", label="Evento detectado", s=20
-)
-
-plt.title("Eventos detectados sobre línea temporal")
-plt.xlabel("Tiempo")
-plt.ylabel("Error de reconstrucción")
-plt.grid(True)
+# --- Visualización ---
+plt.figure(figsize=(12, 5))
+plt.plot(mse, label="Error de reconstrucción (MSE)", color='blue')
+plt.axhline(threshold, color='orange', linestyle='--', label=f"Umbral ({threshold:.4f})")
+plt.scatter(np.where(event_mask)[0], mse[event_mask], color='red', label="Eventos detectados", s=10)
+plt.title("Errores de reconstrucción y detección de eventos")
+plt.xlabel("Índice de ventana")
+plt.ylabel("Error MSE")
 plt.legend()
+plt.grid(True)
 plt.tight_layout()
+plt.savefig("reconstruction_error_plot.png")
 plt.show()
