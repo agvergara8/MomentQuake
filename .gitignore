@@ -164,3 +164,8 @@ cython_debug/
 /dataPickle
 /datasets
 /detected_windows
+**/*data*/**
+**/*resultados*/**
+*.npy
+*.out
+*.png
