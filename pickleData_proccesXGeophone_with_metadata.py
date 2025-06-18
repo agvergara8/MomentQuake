@@ -1,199 +1,87 @@
 import os
+import pickle
 import numpy as np
 import pandas as pd
-import librosa
-import librosa.display
-import matplotlib.pyplot as plt
-import plotly.express as px
-import plotly.graph_objs as go
-from dash import Dash, dcc, html, Input, Output, State
-import dash_bootstrap_components as dbc
-from io import BytesIO
-import base64
+from obspy.core.stream import Stream
+from tqdm import tqdm
+from datetime import datetime, timedelta
 
-# --- Configuración ---
-RESULTS_DIR = "resultados_inferencia"
-WIN_LENGTH = 128
-HOP_LENGTH = 64
-N_FFT = 512
-WINDOW = 'hann'
-S_MIN = 60
-S_MAX = 120
-FREQ_MIN = 5
-FREQ_MAX = 125
+# --- Configuraciones ---
+DATA_ROOT = "dataPickle/CSIC_LaPalma_Geophone"
+DATASETS_DIR = "datasets"
+GEOPHONES = range(1, 9)
+CHANNELS = ["X", "Y", "Z"]
+WINDOW_SIZE = 512
+STRIDE = 256
+FS = 250  # Frecuencia de muestreo en Hz
+START_OFFSET = 32  # segundos desde medianoche
 
-# --- Inicializar la app ---
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.title = "Explorador de eventos sísmicos"
+os.makedirs(DATASETS_DIR, exist_ok=True)
 
-# --- Geófonos y canales disponibles ---
-geophones = sorted(set([f.split("_")[2] for f in os.listdir(RESULTS_DIR) if f.endswith("_resultados.csv")]))
-channels = ["X", "Y", "Z"]
+# --- Crear ventanas deslizantes ---
+def create_windows(data, window_size=512, stride=256):
+    return np.stack([data[i:i+window_size] for i in range(0, data.shape[0] - window_size + 1, stride)])
 
-# --- Layout ---
-app.layout = dbc.Container([
-    dcc.Store(id="click_info"),
-    html.H2("Explorador de eventos MOMENT"),
-    html.Div([
-        html.Label("Selecciona geófono:"),
-        html.Br(),
-        html.Label("Buscar por timestamp (ej. 2025-02-19T00:07:37,984):"),
-        dcc.Input(id="timestamp_input", type="text", placeholder="Pega un timestamp", debounce=True),
-        html.Button("Buscar ventana", id="buscar_btn", n_clicks=0),
-        html.Br(),
-        dcc.Dropdown(id="geophone", options=[{"label": g, "value": g} for g in geophones], value=geophones[0]),
-        html.Label("Selecciona canal:"),
-        dcc.Dropdown(id="channel", options=[{"label": c, "value": c} for c in channels], value="X"),
-        html.Label("Umbral de error (valor absoluto):"),
-        dcc.Input(id="umbral_input", type="number", value=50, step=0.1)
-    ], style={"marginBottom": "1em"}),
-    dcc.Graph(id="error_plot", style={"height": "40vh"}),
-    html.Hr(),
-    html.Div([
-        html.H4("Ventana seleccionada"),
-        html.Div([
-            dcc.Graph(id="time_plot", style={"width": "48%", "display": "inline-block"}),
-            dcc.Graph(id="spectrogram_plot", style={"width": "48%", "display": "inline-block"})
-        ])
-    ])
-], fluid=True)
-
-# --- Callbacks ---
-@app.callback(
-    Output("error_plot", "figure"),
-    Input("geophone", "value"),
-    Input("channel", "value"),
-    Input("umbral_input", "value")
-)
-def update_error_plot(geo, ch, threshold):
-    base = f"CSIC_LaPalma_{geo}_{ch}"
-    path = os.path.join(RESULTS_DIR, f"{base}_resultados.csv")
-    if not os.path.exists(path):
-        return go.Figure()
-    df = pd.read_csv(path)
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str).str.replace(",", "."), errors="coerce")
-        df = df[df["timestamp"].notnull()].copy()
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        x_vals = df["timestamp"]
-    else:
-        x_vals = list(range(len(df)))
-
-    fig = go.Figure()
-    if "timestamp" in df.columns:
-        x_event = df[df["reconstruction_error"] > threshold]["timestamp"]
-    else:
-        x_event = df[df["reconstruction_error"] > threshold].index
-
-    fig.add_trace(go.Scatter(
-        x=x_vals,
-        y=df["reconstruction_error"],
-        mode="lines",
-        name="Error MSE",
-        line=dict(color="blue"),
-        customdata=df["window_global_idx"]
-    ))
-    fig.add_trace(go.Scatter(
-        x=x_event,
-        y=df[df["reconstruction_error"] > threshold]["reconstruction_error"],
-        mode="markers",
-        name="Eventos",
-        marker=dict(color="red", size=6),
-        customdata=df[df["reconstruction_error"] > threshold]["window_global_idx"]
-    ))
-
-    
-    fig.update_layout(title=f"Errores de reconstrucción - {base}",
-                      xaxis_title="Tiempo" if "timestamp" in df.columns else "Índice de ventana",
-                      yaxis_title="Error MSE",
-                      annotations=[dict(text='Actualización completada', xref='paper', yref='paper', showarrow=False, x=0.99, y=0.01, font=dict(size=12, color='green'), xanchor='right', yanchor='bottom')],
-                      clickmode="event+select")
-    return fig
-
-@app.callback(
-    Output("time_plot", "figure"),
-    Output("click_info", "data"),
-    Output("spectrogram_plot", "figure"),
-    Input("error_plot", "clickData"),
-    State("geophone", "value"),
-    State("channel", "value")
-)
-def show_selected_window(clickData, geo, ch):
-    if clickData is None:
-        return go.Figure(), {}, go.Figure()
+# --- Cargar .pickle a array ---
+def load_stream_as_array(path):
     try:
-        point = clickData["points"][0]
-        if "customdata" not in point:
-            raise ValueError("customdata ausente en el punto clicado")
-        
-        index_global = int(click_info["index"])
-        print(f"[DEBUG] Clic detectado: window_global_idx = {index_global}")
-        base = f"CSIC_LaPalma_{geo}_{ch}"
-        csv_path = os.path.join("resultados_inferencia", f"{base}_resultados.csv")
-        df = pd.read_csv(csv_path)
-        df = df[df["timestamp"].notnull()].copy()
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        df["window_global_idx"] = df["window_global_idx"].astype(int)
-        match = df[df["window_global_idx"] == index_global]
-        if match.empty:
-            return go.Figure(), {}, go.Figure()
-        index = match.index[0]
-        print(f"[DEBUG] Índice relativo en el .npy: {index}")
+        with open(path, "rb") as f:
+            stream = pickle.load(f)
+            if not isinstance(stream, Stream):
+                return None
+            return np.stack([tr.data for tr in stream], axis=1)
     except Exception as e:
-        print(f"[ERROR] Fallo al procesar clic: {e}")
-        return go.Figure(), {}, go.Figure()
+        print(f"[WARNING] Error loading {path}: {e}")
+        return None
 
-    base = f"CSIC_LaPalma_{geo}_{ch}"
-    npy_path = os.path.join("datasets", f"{base}.npy")
-    if not os.path.exists(npy_path):
-        return go.Figure(), {}, go.Figure()
-    data = np.load(npy_path)
-    if data.ndim == 3 and data.shape[1] != 512:
-        data = np.transpose(data, (0, 2, 1))
-    if index >= len(data):
-        return go.Figure(), {}, go.Figure()
+# --- Procesar una carpeta y generar .npy + metadatos ---
+def process_folder(folder_path):
+    all_segments = []
+    metadata = []
 
-    # Concatenar 2 ventanas antes y después
-    start_idx = max(0, index - 2)
-    end_idx = min(len(data), index + 3)
-    segment = data[start_idx:end_idx].reshape(-1)
-    ventana_offset = (index - start_idx) * 512
+    folder_name = os.path.basename(folder_path)
 
-    # Tiempo en segundos
-    sample_rate = 250  # asumir frecuencia de muestreo fija
-    time_axis = np.arange(len(segment)) / sample_rate
-    time_start = ventana_offset / sample_rate
-    time_end = (ventana_offset + 512) / sample_rate
+    for filename in tqdm(os.listdir(folder_path), desc=f"Procesando {folder_name}"):
+        if not filename.endswith(".pickle"):
+            continue
 
-    fig_time = go.Figure()
-    fig_time.add_trace(go.Scatter(x=time_axis, y=segment, mode="lines", name="Señal extendida"))
-    fig_time.add_vline(x=time_start, line=dict(color="red", dash="dash"))
-    fig_time.add_vline(x=time_end, line=dict(color="red", dash="dash"))
-    fig_time.update_layout(title="Dominio del tiempo", xaxis_title="Tiempo (s)", yaxis_title="Amplitud")
+        file_path = os.path.join(folder_path, filename)
+        arr = load_stream_as_array(file_path)
+        if arr is None:
+            continue
 
-    S = librosa.stft(segment, n_fft=N_FFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH, window=WINDOW, center=True)
-    S_db = librosa.amplitude_to_db(np.abs(S), ref=1, amin=1e-5, top_db=None)
-    t_spec = librosa.frames_to_time(np.arange(S_db.shape[1]), sr=sample_rate, hop_length=HOP_LENGTH)
+        start_time = datetime.strptime(filename.split(" at ")[0], "%d-%b-%Y") + timedelta(seconds=START_OFFSET)
+        windows = create_windows(arr, WINDOW_SIZE, STRIDE)
 
-    fig_spec = px.imshow(
-        S_db,
-        x=t_spec,
-        origin='lower',
-        aspect='auto',
-        color_continuous_scale='jet',
-        labels={'x': 'Tiempo (s)', 'y': 'Frecuencia (Hz)', 'color': 'dB'},
-        zmin=S_MIN, zmax=S_MAX
-    )
-    fig_spec.add_vline(x=time_start, line=dict(color="red", dash="dash"))
-    fig_spec.add_vline(x=time_end, line=dict(color="red", dash="dash"))
-    fig_spec.update_layout(
-        title="Espectrograma",
-        margin=dict(t=30, b=30),
-        coloraxis_colorbar=dict(title="dB", x=1)
-    )
-    fig_spec.update_yaxes(range=[FREQ_MIN, FREQ_MAX])
-    return fig_time, {"index": index_global, "rel_index": index}, fig_spec
+        all_segments.append(windows)
 
-# --- Ejecutar ---
+        for i in range(windows.shape[0]):
+            timestamp = start_time + timedelta(seconds=i * (STRIDE / FS))
+            metadata.append({
+                "window_global_idx": len(metadata),
+                "file": filename,
+                "window_in_file": i,
+                "timestamp": timestamp.isoformat(),
+                "source_folder": folder_name
+            })
+
+    if not all_segments:
+        print(f"[INFO] No se encontraron datos válidos en {folder_path}")
+        return
+
+    full_array = np.concatenate(all_segments, axis=0)
+    print(f"[INFO] Ventanas combinadas: {full_array.shape} en {folder_path}")
+
+    out_base = os.path.join(DATASETS_DIR, folder_name)
+    np.save(out_base + ".npy", full_array)
+    pd.DataFrame(metadata).to_csv(out_base + ".csv", index=False)
+    print(f"[INFO] Guardados: {out_base}.npy y .csv")
+
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False)
+    for geophone in GEOPHONES:
+        for channel in CHANNELS:
+            folder_path = f"{DATA_ROOT}{geophone}_{channel}"
+            if os.path.exists(folder_path):
+                process_folder(folder_path)
+            else:
+                print(f"[INFO] Carpeta no encontrada: {folder_path}")
