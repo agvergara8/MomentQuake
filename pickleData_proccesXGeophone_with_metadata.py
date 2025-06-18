@@ -12,9 +12,9 @@ DATASETS_DIR = "datasets"
 GEOPHONES = range(1, 9)
 CHANNELS = ["X", "Y", "Z"]
 WINDOW_SIZE = 512
-STRIDE = 256
+STRIDE = 512
 FS = 250  # Frecuencia de muestreo en Hz
-START_OFFSET = 32  # segundos desde medianoche
+START_OFFSET = 1  # segundos desde medianoche
 
 os.makedirs(DATASETS_DIR, exist_ok=True)
 

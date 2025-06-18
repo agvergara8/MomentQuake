@@ -2,7 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # --- Configuración ---
-ARCHIVO = "Moment_prediction/CSIC_LaPalma_Geophone6_X_predictions.npy"
+ARCHIVO = "Moment_prediction/CSIC_LaPalma_Geophone1_X_predictions.npy"
+# ARCHIVO = "datasets/CSIC_LaPalma_Geophone1_X.npy"
 # ARCHIVO = "datasets/CSIC_LaPalma_Geophone6_X.npy"
 NUM_VENTANAS = 5
 sample_rate = 250  # Hz

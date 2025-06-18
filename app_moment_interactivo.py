@@ -13,6 +13,7 @@ import base64
 
 # --- Configuración ---
 RESULTS_DIR = "resultados_inferencia"
+PREDICTION_DIR = "Moment_prediction"
 WIN_LENGTH = 128
 HOP_LENGTH = 64
 N_FFT = 512
@@ -53,7 +54,7 @@ app.layout = dbc.Container([
         html.H4("Ventana seleccionada"),
         html.Div([
             dcc.Graph(id="time_plot", style={"width": "48%", "display": "inline-block"}),
-            dcc.Graph(id="spectrogram_plot", style={"width": "48%", "display": "inline-block"})
+            dcc.Graph(id="prediction_plot", style={"width": "48%", "display": "inline-block"})  # Se añadió la predicción
         ])
     ])
 ], fluid=True)
@@ -102,7 +103,6 @@ def update_error_plot(geo, ch, threshold):
         customdata=df[df["reconstruction_error"] > threshold]["window_global_idx"]
     ))
 
-    
     fig.update_layout(title=f"Errores de reconstrucción - {base}",
                       xaxis_title="Tiempo" if "timestamp" in df.columns else "Índice de ventana",
                       yaxis_title="Error MSE",
@@ -112,15 +112,16 @@ def update_error_plot(geo, ch, threshold):
 
 @app.callback(
     Output("time_plot", "figure"),
+    Output("prediction_plot", "figure"),  # Añadido el gráfico de predicción
     Output("clickData", "data"),
-    Output("spectrogram_plot", "figure"),
     Input("error_plot", "clickData"),
     State("geophone", "value"),
     State("channel", "value")
 )
 def show_selected_window(clickData, geo, ch):
     if clickData is None:
-        return go.Figure(), {}, go.Figure()
+        return go.Figure(), go.Figure(), {}
+
     try:
         base = f"CSIC_LaPalma_{geo}_{ch}"
         csv_path = os.path.join("resultados_inferencia", f"{base}_resultados.csv")
@@ -139,82 +140,42 @@ def show_selected_window(clickData, geo, ch):
         index_global = int(closest_row["window_global_idx"])
         print(f"[DEBUG] Timestamp clicado: {timestamp_str}")
         print(f"[DEBUG] Ventana más cercana: window_global_idx = {index_global}")        
-        timestamp_str = clickData.get("x") or clickData.get("points", [{}])[0].get("x")
-        ts_obj = pd.to_datetime(timestamp_str, errors="coerce")
-        if pd.isnull(ts_obj):
-            raise ValueError("Timestamp inválido")
-        closest_row = df.iloc[(df["timestamp"] - ts_obj).abs().argsort().iloc[0]]
-        index_global = int(closest_row["window_global_idx"])
-        print(f"[DEBUG] Timestamp clicado: {timestamp_str}")
-        print(f"[DEBUG] Ventana más cercana: window_global_idx = {index_global}")
+
         base = f"CSIC_LaPalma_{geo}_{ch}"
-        csv_path = os.path.join("resultados_inferencia", f"{base}_resultados.csv")
-        df = pd.read_csv(csv_path)
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str).str.replace(",", "."), errors="coerce")
-        df = df[df["timestamp"].notnull()].copy()
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        df["window_global_idx"] = df["window_global_idx"].astype(int)
-        match = df[df["window_global_idx"] == index_global]
-        if match.empty:
-            return go.Figure(), {}, go.Figure()
-        index = match.index[0]
-        print(f"[DEBUG] Índice relativo en el .npy: {index}")
-        timestamp = match.iloc[0]["timestamp"]
-        print(f"[DEBUG] Timestamp de la ventana seleccionada: {timestamp}")
+        npy_path = os.path.join("datasets", f"{base}.npy")
+        if not os.path.exists(npy_path):
+            return go.Figure(), go.Figure(), {}
+
+        data = np.load(npy_path)
+        if data.ndim == 3 and data.shape[1] != 512:
+            data = np.transpose(data, (0, 2, 1))
+        if index_global >= len(data):
+            return go.Figure(), go.Figure(), {}
+
+        segment = data[index_global].squeeze()
+        time_axis = np.arange(len(segment)) / 250  # sample rate of 250 Hz
+
+        # Gráfico de la señal original (tiempo)
+        fig_time = go.Figure()
+        fig_time.add_trace(go.Scatter(y=segment, mode="lines", name="Señal"))
+
+        # Cargar y mostrar la predicción
+        prediction_path = os.path.join("Moment_prediction", f"{base}_predictions.npy")
+        if os.path.exists(prediction_path):
+            prediction = np.load(prediction_path)
+            pred_segment = prediction[index_global].squeeze()
+
+            # Gráfico de la predicción
+            fig_pred = go.Figure()
+            fig_pred.add_trace(go.Scatter(y=pred_segment, mode="lines", name="Predicción"))
+        else:
+            fig_pred = go.Figure()  # Si no hay predicción, crear una figura vacía
+
+        return fig_time, fig_pred, {"window_global_idx": index_global}
+
     except Exception as e:
         print(f"[ERROR] Fallo al procesar clic: {e}")
-        return go.Figure(), {}, go.Figure()
-
-    base = f"CSIC_LaPalma_{geo}_{ch}"
-    npy_path = os.path.join("datasets", f"{base}.npy")
-    if not os.path.exists(npy_path):
-        return go.Figure(), {}, go.Figure()
-    data = np.load(npy_path)
-    if data.ndim == 3 and data.shape[1] != 512:
-        data = np.transpose(data, (0, 2, 1))
-    if index >= len(data):
-        return go.Figure(), {}, go.Figure()
-
-    # Concatenar 2 ventanas antes y después
-    start_idx = max(0, index_global -2)
-    end_idx = min(len(data), index_global +3)
-    segment = data[start_idx:end_idx].reshape(-1)
-    ventana_offset = (index_global - start_idx) * 512
-
-    # Tiempo en segundos
-    sample_rate = 250  # asumir frecuencia de muestreo fija
-    time_axis = np.arange(len(segment)) / sample_rate
-    time_start = ventana_offset / sample_rate
-    time_end = (ventana_offset + 512) / sample_rate
-
-    fig_time = go.Figure()
-    fig_time.add_trace(go.Scatter(x=time_axis, y=segment, mode="lines", name="Señal extendida"))
-    fig_time.add_vline(x=time_start, line=dict(color="red", dash="dash"))
-    fig_time.add_vline(x=time_end, line=dict(color="red", dash="dash"))
-    fig_time.update_layout(title="Dominio del tiempo", xaxis_title="Tiempo (s)", yaxis_title="Amplitud")
-
-    S = librosa.stft(segment, n_fft=N_FFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH, window=WINDOW, center=True)
-    S_db = librosa.amplitude_to_db(np.abs(S), ref=1, amin=1e-5, top_db=None)
-    t_spec = librosa.frames_to_time(np.arange(S_db.shape[1]), sr=sample_rate, hop_length=HOP_LENGTH)
-
-    fig_spec = px.imshow(
-        S_db,
-        x=t_spec,
-        origin='lower',
-        aspect='auto',
-        color_continuous_scale='jet',
-        labels={'x': 'Tiempo (s)', 'y': 'Frecuencia (Hz)', 'color': 'dB'},
-        zmin=S_MIN, zmax=S_MAX
-    )
-    fig_spec.add_vline(x=time_start, line=dict(color="red", dash="dash"))
-    fig_spec.add_vline(x=time_end, line=dict(color="red", dash="dash"))
-    fig_spec.update_layout(
-        title="Espectrograma",
-        margin=dict(t=30, b=30),
-        coloraxis_colorbar=dict(title="dB", x=1)
-    )
-    fig_spec.update_yaxes(range=[FREQ_MIN, FREQ_MAX])
-    return fig_time, {"index": index_global, "rel_index": index}, fig_spec
+        return go.Figure(), go.Figure(), {}
 
 # --- Ejecutar ---
 if __name__ == "__main__":
