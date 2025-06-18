@@ -2,14 +2,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # --- Configuración ---
-ARCHIVO = "datasets/CSIC_LaPalma_Geophone1_X.npy"
+ARCHIVO = "Moment_prediction/CSIC_LaPalma_Geophone6_X_predictions.npy"
+# ARCHIVO = "datasets/CSIC_LaPalma_Geophone6_X.npy"
 NUM_VENTANAS = 5
 sample_rate = 250  # Hz
 
 # --- Cargar datos ---
 data = np.load(ARCHIVO)
 if data.ndim == 3:
-    data = data[:, :, 0]  # Usa solo el primer canal si es multicanal
+    if ARCHIVO.__contains__("Moment_prediction"):
+        data = data[:, 0, :]  # Usa solo el primer canal si es multicanal
+    else: 
+        data = data[:, :, 0]  # Usa solo el primer canal si es multicanal
 
 total = len(data)
 print(f"[INFO] Total de ventanas: {total}")
@@ -22,7 +26,7 @@ while i < total:
 
     plt.figure(figsize=(14, 4))
     plt.plot(tiempo, bloque, color='steelblue')
-    plt.title(f"Ventanas {i} a {min(i+NUM_VENTANAS-1, total-1)}")
+    plt.title(f"Ventanas {i} a {min(i+NUM_VENTANAS-1, total-1)} de {ARCHIVO}")
     plt.xlabel("Tiempo (s)")
     plt.ylabel("Amplitud")
     plt.grid(True)

@@ -14,7 +14,9 @@ UMBRAL_PERCENTIL = 95                                 # Umbral de clasificación
 BLOCK_SIZE = 5000                                     # Tamaño de bloque
 INPUT_FOLDER = "datasets"
 OUTPUT_FOLDER = "resultados_inferencia"
+PREDICTION_FOLDER = "Moment_prediction"  # Carpeta para guardar predicciones
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(PREDICTION_FOLDER, exist_ok=True)  # Crear la carpeta para las predicciones
 
 # --- Preguntar al usuario si quiere procesar todo o por bloques ---
 print("\n[INTERACTIVO] Elige el modo de ejecución:")
@@ -50,6 +52,8 @@ for file_name in npy_files:
     print(f"[INFO] Total de ventanas: {N}")
 
     all_mse = []
+    predictions = []  # Lista para almacenar las predicciones
+
     for start in tqdm(range(0, N, BLOCK_SIZE), desc=f"Procesando {file_name}"):
         end = min(start + BLOCK_SIZE, N)
         data_block = data[start:end]
@@ -65,6 +69,9 @@ for file_name in npy_files:
 
         mse = ((data_norm - reconstruction) ** 2).mean(dim=(1, 2)).cpu().numpy()
         all_mse.append(mse)
+
+        # Almacenando las predicciones
+        predictions.append(reconstruction.cpu().numpy())
 
         if modo == "2":
             cont = input("\n¿Procesar siguiente bloque? (s/n): ").strip().lower()
@@ -82,6 +89,10 @@ for file_name in npy_files:
     # Guardar errores y máscara
     np.save(os.path.join(OUTPUT_FOLDER, f"{base_name}_errors.npy"), all_mse)
     np.save(os.path.join(OUTPUT_FOLDER, f"{base_name}_event_mask.npy"), event_mask.astype(np.uint8))
+
+    # Guardar las predicciones
+    np.save(os.path.join(PREDICTION_FOLDER, f"{base_name}_predictions.npy"), np.concatenate(predictions, axis=0))
+    print(f"[INFO] Predicción guardada en {PREDICTION_FOLDER}/{base_name}_predictions.npy")
 
     # Enriquecer CSV si existe
     csv_path = os.path.join(INPUT_FOLDER, base_name + ".csv")
