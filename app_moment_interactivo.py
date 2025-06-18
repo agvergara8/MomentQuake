@@ -32,9 +32,15 @@ channels = ["X", "Y", "Z"]
 
 # --- Layout ---
 app.layout = dbc.Container([
+    dcc.Store(id="clickData"),
     html.H2("Explorador de eventos MOMENT"),
     html.Div([
         html.Label("Selecciona geófono:"),
+        html.Br(),
+        html.Label("Buscar por timestamp (ej. 2025-02-19T00:07:37,984):"),
+        dcc.Input(id="timestamp_input", type="text", placeholder="Pega un timestamp", debounce=True),
+        html.Button("Buscar ventana", id="buscar_btn", n_clicks=0),
+        html.Br(),
         dcc.Dropdown(id="geophone", options=[{"label": g, "value": g} for g in geophones], value=geophones[0]),
         html.Label("Selecciona canal:"),
         dcc.Dropdown(id="channel", options=[{"label": c, "value": c} for c in channels], value="X"),
@@ -68,26 +74,35 @@ def update_error_plot(geo, ch, threshold):
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str).str.replace(",", "."), errors="coerce")
         df = df[df["timestamp"].notnull()].copy()
-        df = df.sort_values("timestamp")
+        df = df.sort_values("timestamp").reset_index(drop=True)
         x_vals = df["timestamp"]
     else:
         x_vals = list(range(len(df)))
 
     fig = go.Figure()
+    if "timestamp" in df.columns:
+        x_event = df[df["reconstruction_error"] > threshold]["timestamp"]
+    else:
+        x_event = df[df["reconstruction_error"] > threshold].index
+
     fig.add_trace(go.Scatter(
         x=x_vals,
         y=df["reconstruction_error"],
         mode="lines",
         name="Error MSE",
-        line=dict(color="blue")
+        line=dict(color="blue"),
+        customdata=df["window_global_idx"]
     ))
     fig.add_trace(go.Scatter(
-        x=df[df["reconstruction_error"] > threshold]["timestamp"] if "timestamp" in df.columns else df[df["reconstruction_error"] > threshold].index,
+        x=x_event,
         y=df[df["reconstruction_error"] > threshold]["reconstruction_error"],
         mode="markers",
         name="Eventos",
-        marker=dict(color="red", size=6)
+        marker=dict(color="red", size=6),
+        customdata=df[df["reconstruction_error"] > threshold]["window_global_idx"]
     ))
+
+    
     fig.update_layout(title=f"Errores de reconstrucción - {base}",
                       xaxis_title="Tiempo" if "timestamp" in df.columns else "Índice de ventana",
                       yaxis_title="Error MSE",
@@ -97,6 +112,7 @@ def update_error_plot(geo, ch, threshold):
 
 @app.callback(
     Output("time_plot", "figure"),
+    Output("clickData", "data"),
     Output("spectrogram_plot", "figure"),
     Input("error_plot", "clickData"),
     State("geophone", "value"),
@@ -104,46 +120,102 @@ def update_error_plot(geo, ch, threshold):
 )
 def show_selected_window(clickData, geo, ch):
     if clickData is None:
-        return go.Figure(), go.Figure()
+        return go.Figure(), {}, go.Figure()
     try:
-        index = clickData["points"][0]["pointIndex"]
-    except Exception:
-        return go.Figure(), go.Figure()
+        base = f"CSIC_LaPalma_{geo}_{ch}"
+        csv_path = os.path.join("resultados_inferencia", f"{base}_resultados.csv")
+        df = pd.read_csv(csv_path)
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str).str.replace(",", "."), errors="coerce")
+        df = df[df["timestamp"].notnull()].copy()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df["window_global_idx"] = df["window_global_idx"].astype(int)
+
+        timestamp_str = clickData.get("points", [{}])[0].get("x")
+        ts_obj = pd.to_datetime(timestamp_str, errors="coerce")
+        if pd.isnull(ts_obj):
+            raise ValueError("Timestamp inválido")
+
+        closest_row = df.iloc[(df["timestamp"] - ts_obj).abs().argsort().iloc[0]]
+        index_global = int(closest_row["window_global_idx"])
+        print(f"[DEBUG] Timestamp clicado: {timestamp_str}")
+        print(f"[DEBUG] Ventana más cercana: window_global_idx = {index_global}")        
+        timestamp_str = clickData.get("x") or clickData.get("points", [{}])[0].get("x")
+        ts_obj = pd.to_datetime(timestamp_str, errors="coerce")
+        if pd.isnull(ts_obj):
+            raise ValueError("Timestamp inválido")
+        closest_row = df.iloc[(df["timestamp"] - ts_obj).abs().argsort().iloc[0]]
+        index_global = int(closest_row["window_global_idx"])
+        print(f"[DEBUG] Timestamp clicado: {timestamp_str}")
+        print(f"[DEBUG] Ventana más cercana: window_global_idx = {index_global}")
+        base = f"CSIC_LaPalma_{geo}_{ch}"
+        csv_path = os.path.join("resultados_inferencia", f"{base}_resultados.csv")
+        df = pd.read_csv(csv_path)
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str).str.replace(",", "."), errors="coerce")
+        df = df[df["timestamp"].notnull()].copy()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df["window_global_idx"] = df["window_global_idx"].astype(int)
+        match = df[df["window_global_idx"] == index_global]
+        if match.empty:
+            return go.Figure(), {}, go.Figure()
+        index = match.index[0]
+        print(f"[DEBUG] Índice relativo en el .npy: {index}")
+        timestamp = match.iloc[0]["timestamp"]
+        print(f"[DEBUG] Timestamp de la ventana seleccionada: {timestamp}")
+    except Exception as e:
+        print(f"[ERROR] Fallo al procesar clic: {e}")
+        return go.Figure(), {}, go.Figure()
 
     base = f"CSIC_LaPalma_{geo}_{ch}"
     npy_path = os.path.join("datasets", f"{base}.npy")
     if not os.path.exists(npy_path):
-        return go.Figure(), go.Figure()
+        return go.Figure(), {}, go.Figure()
     data = np.load(npy_path)
     if data.ndim == 3 and data.shape[1] != 512:
         data = np.transpose(data, (0, 2, 1))
     if index >= len(data):
-        return go.Figure(), go.Figure()
-    y = data[index].squeeze()
+        return go.Figure(), {}, go.Figure()
+
+    # Concatenar 2 ventanas antes y después
+    start_idx = max(0, index_global -2)
+    end_idx = min(len(data), index_global +3)
+    segment = data[start_idx:end_idx].reshape(-1)
+    ventana_offset = (index_global - start_idx) * 512
+
+    # Tiempo en segundos
+    sample_rate = 250  # asumir frecuencia de muestreo fija
+    time_axis = np.arange(len(segment)) / sample_rate
+    time_start = ventana_offset / sample_rate
+    time_end = (ventana_offset + 512) / sample_rate
 
     fig_time = go.Figure()
-    fig_time.add_trace(go.Scatter(y=y, mode="lines", name="Señal"))
-    fig_time.update_layout(title="Dominio del tiempo", xaxis_title="Muestra", yaxis_title="Amplitud")
+    fig_time.add_trace(go.Scatter(x=time_axis, y=segment, mode="lines", name="Señal extendida"))
+    fig_time.add_vline(x=time_start, line=dict(color="red", dash="dash"))
+    fig_time.add_vline(x=time_end, line=dict(color="red", dash="dash"))
+    fig_time.update_layout(title="Dominio del tiempo", xaxis_title="Tiempo (s)", yaxis_title="Amplitud")
 
-    S = librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH, window=WINDOW, center=True)
+    S = librosa.stft(segment, n_fft=N_FFT, hop_length=HOP_LENGTH, win_length=WIN_LENGTH, window=WINDOW, center=True)
     S_db = librosa.amplitude_to_db(np.abs(S), ref=1, amin=1e-5, top_db=None)
+    t_spec = librosa.frames_to_time(np.arange(S_db.shape[1]), sr=sample_rate, hop_length=HOP_LENGTH)
+
     fig_spec = px.imshow(
         S_db,
+        x=t_spec,
         origin='lower',
         aspect='auto',
         color_continuous_scale='jet',
-        labels={'x': 'Tiempo (frames)', 'y': 'Frecuencia (Hz)', 'color': 'dB'},
+        labels={'x': 'Tiempo (s)', 'y': 'Frecuencia (Hz)', 'color': 'dB'},
         zmin=S_MIN, zmax=S_MAX
     )
+    fig_spec.add_vline(x=time_start, line=dict(color="red", dash="dash"))
+    fig_spec.add_vline(x=time_end, line=dict(color="red", dash="dash"))
     fig_spec.update_layout(
         title="Espectrograma",
         margin=dict(t=30, b=30),
         coloraxis_colorbar=dict(title="dB", x=1)
     )
     fig_spec.update_yaxes(range=[FREQ_MIN, FREQ_MAX])
-    fig_spec.update_yaxes(range=[FREQ_MIN, FREQ_MAX])
-    return fig_time, fig_spec
+    return fig_time, {"index": index_global, "rel_index": index}, fig_spec
 
 # --- Ejecutar ---
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, use_reloader=False)
