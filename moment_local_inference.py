@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 CONFIG_PATH = "configs/moment_base.yaml"             # Configuración del modelo
 UMBRAL_PERCENTIL = 95                                 # Umbral de clasificación (percentil del error)
 BLOCK_SIZE = 5000                                     # Tamaño de bloque
-INPUT_FOLDER = "datasets"
+INPUT_FOLDER = "datasets_stead_blocks"
+# INPUT_FOLDER = "datasets"                            # cambiar según se quiera
 OUTPUT_FOLDER = "resultados_inferencia"
 PREDICTION_FOLDER = "Moment_prediction"  # Carpeta para guardar predicciones
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)

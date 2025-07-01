@@ -110,9 +110,10 @@ def update_error_plot(geo, ch, threshold):
                       clickmode="event+select")
     return fig
 
+# --- Mostrar ventana seleccionada con contexto y líneas rojas ---
 @app.callback(
     Output("time_plot", "figure"),
-    Output("prediction_plot", "figure"),  # Añadido el gráfico de predicción
+    Output("prediction_plot", "figure"),
     Output("clickData", "data"),
     Input("error_plot", "clickData"),
     State("geophone", "value"),
@@ -138,10 +139,7 @@ def show_selected_window(clickData, geo, ch):
 
         closest_row = df.iloc[(df["timestamp"] - ts_obj).abs().argsort().iloc[0]]
         index_global = int(closest_row["window_global_idx"])
-        print(f"[DEBUG] Timestamp clicado: {timestamp_str}")
-        print(f"[DEBUG] Ventana más cercana: window_global_idx = {index_global}")        
 
-        base = f"CSIC_LaPalma_{geo}_{ch}"
         npy_path = os.path.join("datasets", f"{base}.npy")
         if not os.path.exists(npy_path):
             return go.Figure(), go.Figure(), {}
@@ -149,33 +147,47 @@ def show_selected_window(clickData, geo, ch):
         data = np.load(npy_path)
         if data.ndim == 3 and data.shape[1] != 512:
             data = np.transpose(data, (0, 2, 1))
+
         if index_global >= len(data):
             return go.Figure(), go.Figure(), {}
 
-        segment = data[index_global].squeeze()
-        time_axis = np.arange(len(segment)) / 250  # sample rate of 250 Hz
+        # Contexto: dos ventanas antes y después
+        start_idx = max(0, index_global - 2)
+        end_idx = min(len(data) - 1, index_global + 2)
 
-        # Gráfico de la señal original (tiempo)
+        # Concatenar las ventanas
+        context_segment = data[start_idx:end_idx + 1].flatten()
+        context_time_axis = np.arange(len(context_segment)) / 250
+
+        # Calcular los límites de la ventana seleccionada
+        window_len = data.shape[1]
+        ventana_rel_ini = (index_global - start_idx) * window_len / 250
+        ventana_rel_fin = ventana_rel_ini + window_len / 250
+
+        # Señal
         fig_time = go.Figure()
-        fig_time.add_trace(go.Scatter(y=segment, mode="lines", name="Señal"))
+        fig_time.update_layout(title="Ventana seleccionada con contexto")
+        fig_time.add_trace(go.Scatter(x=context_time_axis, y=context_segment, mode="lines", name="Señal"))
+        fig_time.add_vline(x=ventana_rel_ini, line=dict(color="red"))
+        fig_time.add_vline(x=ventana_rel_fin, line=dict(color="red"))
 
-        # Cargar y mostrar la predicción
+        # Predicción
         prediction_path = os.path.join("Moment_prediction", f"{base}_predictions.npy")
+        fig_pred = go.Figure()
         if os.path.exists(prediction_path):
             prediction = np.load(prediction_path)
-            pred_segment = prediction[index_global].squeeze()
-
-            # Gráfico de la predicción
-            fig_pred = go.Figure()
-            fig_pred.add_trace(go.Scatter(y=pred_segment, mode="lines", name="Predicción"))
-        else:
-            fig_pred = go.Figure()  # Si no hay predicción, crear una figura vacía
+            prediction_context = prediction[start_idx:end_idx + 1].flatten()
+            fig_pred.update_layout(title="Predicción con contexto")
+            fig_pred.add_trace(go.Scatter(x=context_time_axis, y=prediction_context, mode="lines", name="Predicción"))
+            fig_pred.add_vline(x=ventana_rel_ini, line=dict(color="red"))
+            fig_pred.add_vline(x=ventana_rel_fin, line=dict(color="red"))
 
         return fig_time, fig_pred, {"window_global_idx": index_global}
 
     except Exception as e:
         print(f"[ERROR] Fallo al procesar clic: {e}")
         return go.Figure(), go.Figure(), {}
+
 
 # --- Ejecutar ---
 if __name__ == "__main__":
